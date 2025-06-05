@@ -2,17 +2,25 @@ import sys
 
 from legal_search import Pipeline, WebContentExtractor
 import re
+from dotenv import load_dotenv
 
+load_dotenv()
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(
-            "請提供輸入文字或網址，例如：python main.py '台中市一名男子酒駕致三人死亡' 或 python main.py 'https://news.example.com/drunk-driving-taichung'")
-        sys.exit(1)
+    # 檢查命令列參數
+    if len(sys.argv) >= 2:
+        input_str = sys.argv[1]
+    else:
+        # 無參數時，提示使用者輸入
+        print("請輸入事件描述或新聞網址：")
+        input_str = input().strip()
 
-    input_str = sys.argv[1]
-    pipeline = Pipeline(k=3)
+    # 檢查輸入是否為空
+    if not input_str:
+        print("輸入為空，請提供有效文字或網址")
+        sys.exit(1)
+    pipeline = Pipeline()
 
     # 檢查是否為網址
     if re.match(r'^https?://', input_str, re.IGNORECASE):

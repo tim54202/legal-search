@@ -1,8 +1,12 @@
-import argparse, hashlib, os, pathlib, re, sqlite3, textwrap, time, requests, bs4
+import os, pathlib, re, requests, bs4
+import datetime
+import tempfile
+
 from keybert import KeyBERT
 from openai import OpenAI
 import jieba
 from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -13,11 +17,9 @@ import logging
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+# log
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-# parameter
-RAW = pathlib.Path("raw"); RAW.mkdir(exist_ok=True)
-DB  = pathlib.Path("cache.db")
 
 # 1. Extract Keyword
 class KeywordExtractor:
@@ -33,9 +35,9 @@ class KeywordExtractor:
         # 提取關鍵字
         keywords = self.model.extract_keywords(
             segmented_txt,
-            top_n=top,
-            keyphrase_ngram_range=(1, 1),
-            stop_words=None  # 移除停用詞
+            top_n = top,
+            keyphrase_ngram_range = (1, 1),
+            stop_words = None  # 移除停用詞
         )
         result = [k for k, _ in keywords]
 
@@ -46,7 +48,7 @@ class KeywordExtractor:
 
         return result
 
-# Auto crawler
+# Selenium fetch links
 class FetchLinks:
     def fetch_judgment_links_by_keywords(self, keywords, max_results=5, driver_path="/usr/local/bin/chromedriver"):
         try:
@@ -54,42 +56,36 @@ class FetchLinks:
             logger.info(f"Use chromedriver: {driver_path}")
             service = Service(driver_path)
             options = webdriver.ChromeOptions()
-            # options.add_argument('--headless')  # 取消註解以啟用無頭模式
+            options.add_argument('--headless')  # 取消註解以啟用無頭模式
             driver = webdriver.Chrome(service=service, options=options)
             logger.info("Chrome 瀏覽器已啟動")
 
-            # 步驟 1: 訪問網站
+            # 1. 訪問網站
             logger.info("訪問司法院網站")
             driver.get("https://judgment.judicial.gov.tw/FJUD/default.aspx")
-            time.sleep(3)  # 增加等待時間
+            #time.sleep(1)  # 增加等待時間
 
-            # 處理可能的彈窗或多窗口
+            # 1.1 處理可能的彈窗或多窗口
             if len(driver.window_handles) > 1:
                 logger.info("檢測到多個窗口，切換到最新窗口")
                 driver.switch_to.window(driver.window_handles[-1])
 
-            # 步驟 2: 輸入關鍵字並提交查詢
+            # 2. 輸入關鍵字並提交查詢
             logger.info(f"輸入關鍵字: {' '.join(keywords)}")
-            wait = WebDriverWait(driver, 20)  # 超時時間 20 秒
+            wait = WebDriverWait(driver, 10)  # 超時時間 20 秒
             search_box = wait.until(EC.presence_of_element_located((By.ID, "txtKW")))
             search_box.clear()
             search_box.send_keys(" ".join(keywords))
             search_box.send_keys(Keys.ENTER)
             logger.info("已提交查詢")
 
-            # 步驟 3: 等待 iframe 載入並切換
+            # 3. 等待 iframe 載入並切換
             logger.info("等待 iframe 載入")
             wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "iframe-data")))
-            time.sleep(5)  # 確保動態內容載入
+            time.sleep(1)  # 確保動態內容載入
             logger.info("已切換到 iframe")
 
-            # 輸出 iframe 內的 HTML 用於調試
-            # logger.debug(f"iframe HTML: {driver.page_source[:2000]}")
-            # with open("iframe_source.html", "w", encoding="utf-8") as f:
-            #     f.write(driver.page_source)
-            # logger.info("已將 iframe HTML 寫入 iframe_source.html")
-
-            # 步驟 4: 抓取案例連結
+            # 4. 抓取案例連結
             logger.info("開始抓取案例連結")
             results = []
             # 使用精確的選擇器，抓取案例標題的 <a> 標籤
@@ -141,7 +137,7 @@ class Similarity:
         self.vectorizer = TfidfVectorizer()
 
     def compute(self, keywords, cases):
-        """計算案例摘要與關鍵字的相似度"""
+        # 計算案例摘要與關鍵字的相似度
         if not cases:
             return []
 
@@ -159,21 +155,23 @@ class Similarity:
         return ranked_cases
 
 
-# ---------- GPT ----------
+# 4. GPT summarize
 class Summarizer:
     SYS = "你是法律助理，請先列出各個判決的特點，然後比較下列判決與提問事件的異同，先 2 行針對案件的共同點，再條列 3-5 點差異，最後 3 行總結預計的判罰會怎樣。"
-    def __init__(self): self.cli = OpenAI()
+    def __init__(self):
+        self.cli = OpenAI()
+
     def summarize(self, query, cases):
         docs = "\n\n".join(
             f"[{i+1}] {( '案號：'+c['id']) if c.get('id') else '新聞／其他'}\n"
-            f"{c['fact'][:200]}…" for i,c in enumerate(cases))
+            f"{c['fact'][:300]}…" for i,c in enumerate(cases))
         rsp = self.cli.chat.completions.create(
-            model="gpt-3.5-turbo-0125",
+            model="gpt-3.5-turbo-0125",  #gpt-4o
             messages=[{"role":"system","content":self.SYS},
                       {"role":"user","content":f"事件：{query}\n\n資料：\n{docs}"}])
         return rsp.choices[0].message.content.strip()
 
-# ---------- Pipeline ----------
+# 5. Whole pipeline
 class Pipeline:
     def __init__(self, k=5):
         self.keyword_extractor = KeywordExtractor()
@@ -186,64 +184,127 @@ class Pipeline:
         logger.info(f"提取關鍵字: {query}")
         keywords = self.keyword_extractor.extract(query, top=self.k)
         logger.info(f"提取的關鍵字: {keywords}")
-
-        # 只用第一個關鍵字搜尋
         if not keywords:
             logger.warning("未提取到關鍵字")
-            return "未提取到關鍵字，請嘗試其他輸入。"
-
-        cases = self.fetch_links.fetch_judgment_links_by_keywords([keywords[0]], max_results=20)
-
+            return {"keywords": [], "summary": "未提取到關鍵字，請嘗試其他輸入"}
+        cases = self.fetch_links.fetch_judgment_links_by_keywords([keywords[0]], max_results=10)
         if not cases:
             logger.warning("未找到任何案例")
-            return "未找到相關案例，請嘗試其他關鍵字。"
-
+            return {"keywords": keywords, "summary": "未找到相關案例，請嘗試其他關鍵字"}
         ranked_cases = self.similarity.compute(keywords, cases)
         top_cases = ranked_cases[:5]
-
         summary = self.summarize.summarize(query, top_cases)
-        return summary
+        return {"keywords": keywords, "summary": summary}
 
+# if content is url
 class WebContentExtractor:
     @staticmethod
-    def extract_text_from_url(url, timeout=10):
-        try:
-            logger.info(f"開始爬取網址: {url}")
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
-            }
-            response = requests.get(url, headers=headers, timeout=timeout)
-            response.raise_for_status()
-            response.encoding = response.apparent_encoding
+    def extract_text_from_url(url: str, timeout: int = 10, use_selenium: bool = False) -> str:
+        # 優先使用 requests 提取網頁內容，若失敗則切換到 Selenium。
+        if not use_selenium:
+            try:
+                logger.info(f"開始爬取網址 (requests): {url}")
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Connection': 'keep-alive'
+                }
+                response = requests.get(url, headers=headers, timeout=timeout)
+                response.raise_for_status()
+                response.encoding = response.apparent_encoding
+                soup = bs4.BeautifulSoup(response.text, 'html.parser')
 
-            soup = bs4.BeautifulSoup(response.text, 'html.parser')
-            title = soup.find('title') or soup.find('h1')
-            title_text = title.get_text(strip=True) if title else ''
+                # 提取標題
+                title = soup.find('title') or soup.find('h1') or soup.find('meta', property='og:title')
+                title_text = title.get_text(strip=True) if title and title.get_text else title[
+                    'content'] if title and title.get('content') else ''
+
+                # 提取正文
+                content = ''
+                for tag in soup.find_all(['article', 'div']):
+                    if tag.get('class'):
+                        class_str = ''.join(tag.get('class')).lower()
+                        if 'caas-body' in class_str or 'article-body' in class_str or 'content' in class_str:
+                            content = tag.get_text(strip=True)
+                            break
+                if not content:
+                    paragraphs = soup.find_all('p')
+                    content = ' '.join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
+
+                text = f"{title_text} {content}".strip()
+                text = re.sub(r'\s+', ' ', text)
+                logger.info(f"提取的網頁文本：{text[:300]}...")
+                if not text or len(text) < 10:
+                    logger.warning("網頁內容過少，嘗試使用 Selenium")
+                    return WebContentExtractor.extract_text_from_url(url, timeout, use_selenium=True)
+                return text
+            except requests.exceptions.RequestException as e:
+                logger.error(f"requests 爬取失敗: {url}, {str(e)}")
+                return WebContentExtractor.extract_text_from_url(url, timeout, use_selenium=True)
+            except Exception as e:
+                logger.error(f"requests 解析失敗: {url}, {str(e)}")
+                return WebContentExtractor.extract_text_from_url(url, timeout, use_selenium=True)
+
+        # Selenium 備用
+        try:
+            logger.info(f"開始爬取網址 (Selenium): {url}")
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument(
+                'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            driver = webdriver.Chrome(service=Service('/usr/local/bin/chromedriver'), options=chrome_options)
+            driver.set_page_load_timeout(timeout)
+            driver.get(url)
+
+            try:
+                WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, 'div.caas-body, article, div.content, div.article-body'))
+                )
+                time.sleep(1)
+            except:
+                logger.warning("未找到預期正文標籤，繼續解析")
+
+            soup = bs4.BeautifulSoup(driver.page_source, 'html.parser')
+            driver.quit()
+
+            title = soup.find('title') or soup.find('h1') or soup.find('meta', property='og:title')
+            title_text = title.get_text(strip=True) if title and title.get_text else title[
+                'content'] if title and title.get('content') else ''
 
             content = ''
-            for tag in soup.find_all(['article', 'div', 'p']):
-                if tag.get('class') and 'content' in ''.join(tag.get('class')).lower():
-                    content = tag.get_text(strip=True)
-                    break
+            for tag in soup.find_all(['article', 'div']):
+                if tag.get('class'):
+                    class_str = ''.join(tag.get('class')).lower()
+                    if 'caas-body' in class_str or 'article-body' in class_str or 'content' in class_str:
+                        content = tag.get_text(strip=True)
+                        break
             if not content:
                 paragraphs = soup.find_all('p')
-                content = ' '.join(p.get_text(strip=True) for p in paragraphs)
+                content = ' '.join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
 
             text = f"{title_text} {content}".strip()
             text = re.sub(r'\s+', ' ', text)
-            text = re.sub(r'[^\w\s]', '', text)
-
-            logger.debug(f"提取的網頁文本（前200字）：{text[:200]}...")
-            if not text or len(text) < 50:
-                logger.warning("網頁內容過少，可能為動態加載或無有效文本")
+            logger.info(f"提取的網頁文本：{text[:300]}...")
+            if not text or len(text) < 10:
+                logger.warning("Selenium 提取內容過少")
                 return ''
-
             return text
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"爬取網址失敗: {url}, 錯誤: {str(e)}")
-            return ''
         except Exception as e:
-            logger.error(f"解析網頁內容失敗: {url}, 錯誤: {str(e)}")
+            logger.error(f"Selenium 爬取失敗: {url}, {str(e)}")
+            try:
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                error_file = os.path.join(tempfile.gettempdir(), f"error_page_{timestamp}.html")
+                with open(error_file, "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                logger.info(f"已將錯誤頁面寫入 {error_file}")
+            except Exception as write_error:
+                logger.error(f"無法寫入頁面 HTML: {str(write_error)}")
+            try:
+                driver.quit()
+            except:
+                pass
             return ''
-
