@@ -66,7 +66,7 @@ The app will extract keywords, fetch relevant legal cases, compute similarities,
 
 
 ## Demo
-Here is a demo video. ![GITHUB](Demo_Legal_Search.mov)
+ ![Here is a demo video.](Demo_Legal_Search.mov)
 
 ## License
 
