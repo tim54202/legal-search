@@ -24,10 +24,10 @@ This application is designed to assist users in legal research by enabling them 
 
 1. **Environment Variables:**
    You must set the `OPENAI_API_KEY` environment variable with a valid OpenAI API key.
-   
+
    ```bash
    OPENAI_API_KEY=your_api_key_here
-   
+   ```
    
 3. **Selenium Google Chrome Driver:**
   Install Google Chrome and the corresponding ChromeDriver. Ensure the ChromeDriver executable is in your system PATH or specify the path in the code (e.g., `/usr/local/bin/chromedriver`).
